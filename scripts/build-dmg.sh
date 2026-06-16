@@ -10,8 +10,22 @@
 #
 # Usage:
 #   ./scripts/build-dmg.sh            # build + package into dist/
+#   ./scripts/build-dmg.sh --release  # also tag vX.Y and publish a GitHub
+#                                      # release with the DMG attached (needs gh)
 #
 set -euo pipefail
+
+# --- Args ------------------------------------------------------------------
+DO_RELEASE=false
+for arg in "$@"; do
+  case "$arg" in
+    --release) DO_RELEASE=true ;;
+    -h|--help)
+      /usr/bin/sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) echo "error: unknown argument '$arg' (use --release or --help)" >&2; exit 2 ;;
+  esac
+done
 
 # --- Config ----------------------------------------------------------------
 PROJECT="copy-on-select.xcodeproj"
@@ -36,6 +50,19 @@ VERSION="${VERSION:-1.0}"
 
 DMG_NAME="${APP_NAME}-${VERSION}.dmg"
 DMG_PATH="$DIST_DIR/$DMG_NAME"
+TAG="v${VERSION}"
+
+# --- Release pre-flight (fail fast before the build) -----------------------
+if [[ "$DO_RELEASE" == true ]]; then
+  command -v gh >/dev/null || {
+    echo "error: --release needs the GitHub CLI ('gh'); install it first." >&2; exit 1; }
+  gh auth status >/dev/null 2>&1 || {
+    echo "error: gh is not authenticated; run 'gh auth login'." >&2; exit 1; }
+  if gh release view "$TAG" >/dev/null 2>&1; then
+    echo "error: release $TAG already exists. Bump MARKETING_VERSION first." >&2
+    exit 1
+  fi
+fi
 
 echo "==> Building $SCHEME ($CONFIGURATION) v$VERSION"
 
@@ -80,3 +107,37 @@ hdiutil create \
 
 echo "==> DMG created: $DMG_PATH"
 echo "    size: $(du -h "$DMG_PATH" | cut -f1)"
+
+# --- 4. Publish a GitHub release (optional) --------------------------------
+if [[ "$DO_RELEASE" == true ]]; then
+  echo "==> Publishing GitHub release $TAG"
+
+  # Tag the current commit and push it (skip if the tag already exists locally).
+  if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+    git tag "$TAG"
+  fi
+  git push origin "$TAG"
+
+  NOTES="Automatically copies selected text to the clipboard, system-wide — the terminal 'copy-on-select' behavior, brought to all of macOS as a background menu-bar app.
+
+## Install
+1. Download **${DMG_NAME}** below.
+2. Open it and drag **${APP_NAME}** to **Applications**.
+3. Launch it. Because the app is not notarized, macOS Gatekeeper will warn the first time — **right-click the app → Open** (or run \`xattr -dr com.apple.quarantine /Applications/${APP_NAME}.app\`).
+4. From the menu-bar icon, choose **Grant Accessibility Access…** and enable **${APP_NAME}** under System Settings → Privacy & Security → Accessibility.
+
+## Usage
+With the toggle on and Accessibility granted, just select text — by mouse drag or Shift+arrows — and it lands on your clipboard automatically.
+
+## Requirements
+- macOS 15.7+
+
+> Note: this build is signed for local use but **not notarized**, so it shows a Gatekeeper warning on first launch (see install step 3). Accessibility permission must be granted on each machine."
+
+  gh release create "$TAG" "$DMG_PATH" \
+    --title "$APP_NAME $TAG" \
+    --target "$(git rev-parse HEAD)" \
+    --notes "$NOTES"
+
+  echo "==> Released: $(gh release view "$TAG" --json url --jq .url)"
+fi
