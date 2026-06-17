@@ -44,6 +44,23 @@ final class SelectionWatcher {
     /// mid-selection while Shift is held never fires a partial capture.
     private var pendingKeyboardSelection = false
 
+    /// Latched when a keyboard selection begins while the suppressor modifier is
+    /// held. We check it at capture time because the modifier may already be
+    /// released by then (the capture fires on Shift-release). Holding the
+    /// suppressor during a selection means "don't copy this".
+    private var suppressPendingKeyboardSelection = false
+
+    /// Live suppressor-modifier state, tracked from every event's flags. Used by
+    /// the mouse-drag path, where the suppress decision is made at mouse-up.
+    private var suppressorHeld = false
+
+    /// The modifier flag(s) that suppress a copy when held during a selection.
+    /// User-configurable; defaults to Control. Read fresh from UserDefaults so a
+    /// change in the menu takes effect immediately without restarting the tap.
+    private var suppressModifier: CGEventFlags {
+        SuppressKey.current.cgFlags
+    }
+
     /// Safety-net timer: if we somehow miss the Shift-release event, capture
     /// after the user stops pressing keys for this long. Generous so it rarely
     /// pre-empts a real Shift-release.
@@ -108,6 +125,7 @@ final class SelectionWatcher {
         keyboardSelectionDebounce?.cancel()
         keyboardSelectionDebounce = nil
         pendingKeyboardSelection = false
+        suppressPendingKeyboardSelection = false
         CGEvent.tapEnable(tap: tap, enable: false)
         if let source = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
@@ -120,6 +138,11 @@ final class SelectionWatcher {
     // MARK: - Event handling
 
     private func handle(type: CGEventType, event: CGEvent) {
+        // Every event carries the current modifier flags; keep our live view of
+        // the suppressor modifier fresh for the mouse-drag suppress check.
+        let suppressor = suppressModifier
+        suppressorHeld = event.flags.contains(suppressor)
+
         switch type {
         case .leftMouseDown:
             didDragSinceMouseDown = false
@@ -137,6 +160,9 @@ final class SelectionWatcher {
         case .leftMouseUp:
             if didDragSinceMouseDown {
                 didDragSinceMouseDown = false
+                // Suppressor held during the drag → user is selecting to
+                // replace, not to copy. Leave the clipboard untouched.
+                if suppressorHeld { break }
                 // Defer slightly: let the target app finalize its selection
                 // state before we read it.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
@@ -149,6 +175,11 @@ final class SelectionWatcher {
                 // Mark a selection in progress and arm the safety-net timer.
                 // We don't capture here — the real trigger is Shift-release.
                 pendingKeyboardSelection = true
+                // Latch the suppressor now; by Shift-release it may be gone.
+                // Holding it during the selection suppresses the copy.
+                if event.flags.contains(suppressModifier) {
+                    suppressPendingKeyboardSelection = true
+                }
                 scheduleKeyboardCapture()
             }
 
@@ -214,6 +245,11 @@ final class SelectionWatcher {
         pendingKeyboardSelection = false
         keyboardSelectionDebounce?.cancel()
         keyboardSelectionDebounce = nil
+        // Suppressor was held when this selection began → suppress the copy.
+        if suppressPendingKeyboardSelection {
+            suppressPendingKeyboardSelection = false
+            return
+        }
         captureKeyboardSelection()
     }
 

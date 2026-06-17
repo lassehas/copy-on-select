@@ -22,6 +22,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// user makes in System Settings while we're running.
     private var permissionTimer: Timer?
 
+    /// Retained while the record-key panel is open.
+    private var recorder: SuppressKeyRecorder?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         setUpStatusItem()
         applyEnabledState()
@@ -66,6 +69,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         toggleItem.target = self
         toggleItem.state = (isEnabled && granted) ? .on : .off
         menu.addItem(toggleItem)
+
+        // Suppress-key configuration.
+        let suppressInfo = NSMenuItem(
+            title: "Suppress Key: \(SuppressKey.current.displayString) (hold while selecting)",
+            action: nil,
+            keyEquivalent: ""
+        )
+        suppressInfo.isEnabled = false
+        menu.addItem(suppressInfo)
+
+        let setSuppress = NSMenuItem(
+            title: "Set Suppress Key…",
+            action: #selector(setSuppressKey),
+            keyEquivalent: ""
+        )
+        setSuppress.target = self
+        menu.addItem(setSuppress)
 
         menu.addItem(.separator())
 
@@ -112,6 +132,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func requestAccessibility() {
         // Triggers the system prompt that deep-links to System Settings.
         _ = isAccessibilityTrusted(prompt: true)
+    }
+
+    @objc private func setSuppressKey() {
+        let recorder = SuppressKeyRecorder()
+        self.recorder = recorder
+        recorder.present(current: SuppressKey.current) { [weak self] key in
+            // nil = cancelled or no allowed modifier held; leave setting as-is.
+            if let key {
+                key.save()
+            }
+            self?.recorder = nil
+            self?.rebuildMenu()
+        }
     }
 
     @objc private func quit() {
